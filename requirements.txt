@@ -1,0 +1,9 @@
+flask
+twilio
+razorpay
+amadeus
+sendgrid
+psycopg2-binary
+python-dotenv
+openai
+azure-cognitiveservices-speech
