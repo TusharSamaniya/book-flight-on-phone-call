@@ -1,15 +1,34 @@
-from flask import Flask, request
+import os
+import requests
+from flask import Flask, request, send_from_directory
 from twilio.twiml.voice_response import VoiceResponse
+
+from config import GROQ_API_KEY, GROQ_STT_MODEL, GROQ_TTS_MODEL, GROQ_TTS_VOICE
+from conversation import QUESTIONS, get_next_question
 
 app = Flask(__name__)
 
+# In-memory session tracker: { call_sid: {"step": int, "responses": {...}} }
+# This resets whenever the server restarts — Task 6 will replace this
+# with permanent storage in Supabase.
+call_sessions = {}
+
+
+@app.route("/static_audio/<filename>")
+def serve_audio(filename):
+    return send_from_directory("static_audio", filename)
+
+
 @app.route("/voice", methods=["POST"])
 def voice():
-    greeting_text = "Hello, I am your AI flight assistant. Where would you like to fly from?"
-    synthesize_text(greeting_text, "greeting.wav")
+    call_sid = request.form.get("CallSid")
+    call_sessions[call_sid] = {"step": 0, "responses": {}}
+
+    first_question = get_next_question(0)
+    synthesize_text(first_question["text"], "question.wav")
 
     resp = VoiceResponse()
-    resp.play(request.url_root + "static_audio/greeting.wav")
+    resp.play(request.url_root + "static_audio/question.wav")
     resp.record(
         action="/handle-recording",
         method="POST",
@@ -18,12 +37,10 @@ def voice():
     )
     return str(resp)
 
-import requests
-import os
-from config import GROQ_API_KEY, GROQ_STT_MODEL
 
 @app.route("/handle-recording", methods=["POST"])
 def handle_recording():
+    call_sid = request.form.get("CallSid")
     recording_url = request.form.get("RecordingUrl")
     audio_url = recording_url + ".wav"
 
@@ -34,11 +51,30 @@ def handle_recording():
     transcript = transcribe_audio("temp_recording.wav")
     print("User said:", transcript)
 
-    reply_text = f"You said: {transcript}. Thank you, goodbye for now."
-    synthesize_text(reply_text, "reply.wav")
+    session = call_sessions.get(call_sid, {"step": 0, "responses": {}})
+    current_step = session["step"]
+    current_question = QUESTIONS[current_step]
+    session["responses"][current_question["key"]] = transcript
+    session["step"] += 1
+    call_sessions[call_sid] = session
 
     resp = VoiceResponse()
-    resp.play(request.url_root + "static_audio/reply.wav")
+    next_question = get_next_question(session["step"])
+
+    if next_question:
+        synthesize_text(next_question["text"], "question.wav")
+        resp.play(request.url_root + "static_audio/question.wav")
+        resp.record(
+            action="/handle-recording",
+            method="POST",
+            max_length=10,
+            play_beep=True
+        )
+    else:
+        synthesize_text("Thank you! I have all the details I need. Goodbye for now.", "reply.wav")
+        resp.play(request.url_root + "static_audio/reply.wav")
+        print("Final responses:", session["responses"])
+
     return str(resp)
 
 
@@ -50,7 +86,6 @@ def transcribe_audio(file_path):
     response = requests.post(url, headers=headers, files=files, data=data)
     return response.json()["text"]
 
-from config import GROQ_TTS_MODEL, GROQ_TTS_VOICE
 
 def synthesize_text(text, filename):
     url = "https://api.groq.com/openai/v1/audio/speech"
@@ -65,6 +100,7 @@ def synthesize_text(text, filename):
     with open(filepath, "wb") as f:
         f.write(response.content)
     return filepath
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
