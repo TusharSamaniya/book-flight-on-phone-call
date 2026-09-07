@@ -5,8 +5,11 @@ app = Flask(__name__)
 
 @app.route("/voice", methods=["POST"])
 def voice():
+    greeting_text = "Hello, I am your AI flight assistant. Where would you like to fly from?"
+    synthesize_text(greeting_text, "greeting.wav")
+
     resp = VoiceResponse()
-    resp.say("Hello, I am your AI flight assistant. Where would you like to fly from?", voice="alice")
+    resp.play(request.url_root + "static_audio/greeting.wav")
     resp.record(
         action="/handle-recording",
         method="POST",
@@ -31,8 +34,11 @@ def handle_recording():
     transcript = transcribe_audio("temp_recording.wav")
     print("User said:", transcript)
 
+    reply_text = f"You said: {transcript}. Thank you, goodbye for now."
+    synthesize_text(reply_text, "reply.wav")
+
     resp = VoiceResponse()
-    resp.say(f"You said: {transcript}. Thank you, goodbye for now.", voice="alice")
+    resp.play(request.url_root + "static_audio/reply.wav")
     return str(resp)
 
 
@@ -43,6 +49,22 @@ def transcribe_audio(file_path):
     data = {"model": GROQ_STT_MODEL}
     response = requests.post(url, headers=headers, files=files, data=data)
     return response.json()["text"]
+
+from config import GROQ_TTS_MODEL, GROQ_TTS_VOICE
+
+def synthesize_text(text, filename):
+    url = "https://api.groq.com/openai/v1/audio/speech"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    data = {
+        "model": GROQ_TTS_MODEL,
+        "voice": GROQ_TTS_VOICE,
+        "input": text
+    }
+    response = requests.post(url, headers=headers, json=data)
+    filepath = f"static_audio/{filename}"
+    with open(filepath, "wb") as f:
+        f.write(response.content)
+    return filepath
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
