@@ -1,9 +1,11 @@
 flask
 twilio
 razorpay
-amadeus
+duffel-api
 sendgrid
 psycopg2-binary
 python-dotenv
 openai
 azure-cognitiveservices-speech
+resend
+groq

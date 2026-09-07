@@ -1,0 +1,26 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+
+DUFFEL_API_KEY = os.getenv("DUFFEL_API_KEY")
+
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL")
+GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL")
+GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE")
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL")
