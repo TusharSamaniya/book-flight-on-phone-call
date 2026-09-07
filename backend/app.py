@@ -58,22 +58,39 @@ def handle_recording():
     session = get_session(call_sid)
     current_step = session["step"]
     responses = session["responses"]
-
     current_question = QUESTIONS[current_step]
-    responses[current_question["key"]] = transcript
-    new_step = current_step + 1
-
-    update_session(call_sid, new_step, responses)
 
     resp = VoiceResponse()
+
+    # If we couldn't understand the caller, ask them to repeat
+    # WITHOUT moving on to the next question.
+    if not transcript or transcript.strip() == "":
+        synthesize_text(
+            "Sorry, I didn't catch that. Could you please repeat?",
+            "retry.wav"
+        )
+        resp.play(request.url_root + "static_audio/retry.wav")
+        resp.record(
+            action="/handle-recording",
+            method="POST",
+            max_length=10,
+            play_beep=True
+        )
+        return str(resp)
+
+    # We got a valid answer — save it and move forward.
+    responses[current_question["key"]] = transcript
+    new_step = current_step + 1
+    update_session(call_sid, new_step, responses)
+
     next_question = get_next_question(new_step)
 
     if next_question:
-        # Use the chat model to naturally acknowledge the answer
-        # and smoothly ask the next question, instead of reading
-        # the raw question text robotically.
         ai_reply = chat_with_ai(transcript, next_question["text"])
-        synthesize_text(ai_reply, "question.wav")
+        # Fall back to the plain question text if the chat model failed.
+        text_to_speak = ai_reply if ai_reply else next_question["text"]
+
+        synthesize_text(text_to_speak, "question.wav")
         resp.play(request.url_root + "static_audio/question.wav")
         resp.record(
             action="/handle-recording",
@@ -89,13 +106,31 @@ def handle_recording():
     return str(resp)
 
 
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    # Catches ANY unhandled crash in our app, so Twilio never just
+    # drops the call silently. The caller hears a polite apology
+    # instead of dead air or an abrupt hangup.
+    print("Unexpected error:", error)
+    resp = VoiceResponse()
+    resp.say(
+        "Sorry, something went wrong on our end. Please try calling again shortly.",
+        voice="alice"
+    )
+    return str(resp)
+
+
 def transcribe_audio(file_path):
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    files = {"file": open(file_path, "rb")}
-    data = {"model": GROQ_STT_MODEL}
-    response = requests.post(url, headers=headers, files=files, data=data)
-    return response.json()["text"]
+    try:
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+        files = {"file": open(file_path, "rb")}
+        data = {"model": GROQ_STT_MODEL}
+        response = requests.post(url, headers=headers, files=files, data=data)
+        return response.json().get("text", "")
+    except Exception as e:
+        print("STT error:", e)
+        return ""
 
 
 def synthesize_text(text, filename):
@@ -114,25 +149,29 @@ def synthesize_text(text, filename):
 
 
 def chat_with_ai(user_input, next_question_text):
-    system_prompt = (
-        "You are a friendly AI flight booking assistant speaking on a phone call. "
-        "The user just answered your previous question. "
-        "Briefly and naturally acknowledge their answer in ONE short sentence, "
-        "then smoothly ask this next question: " + next_question_text + " "
-        "Keep your entire reply under 25 words. Do not add extra questions."
-    )
+    try:
+        system_prompt = (
+            "You are a friendly AI flight booking assistant speaking on a phone call. "
+            "The user just answered your previous question. "
+            "Briefly and naturally acknowledge their answer in ONE short sentence, "
+            "then smoothly ask this next question: " + next_question_text + " "
+            "Keep your entire reply under 25 words. Do not add extra questions."
+        )
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    data = {
-        "model": GROQ_CHAT_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input}
-        ]
-    }
-    response = requests.post(url, headers=headers, json=data)
-    return response.json()["choices"][0]["message"]["content"]
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+        data = {
+            "model": GROQ_CHAT_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input}
+            ]
+        }
+        response = requests.post(url, headers=headers, json=data)
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("Chat model error:", e)
+        return None
 
 
 if __name__ == "__main__":
