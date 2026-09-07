@@ -3,7 +3,13 @@ import requests
 from flask import Flask, request, send_from_directory
 from twilio.twiml.voice_response import VoiceResponse
 
-from config import GROQ_API_KEY, GROQ_STT_MODEL, GROQ_TTS_MODEL, GROQ_TTS_VOICE
+from config import (
+    GROQ_API_KEY,
+    GROQ_STT_MODEL,
+    GROQ_TTS_MODEL,
+    GROQ_TTS_VOICE,
+    GROQ_CHAT_MODEL,
+)
 from conversation import QUESTIONS, get_next_question
 from db import create_session, get_session, update_session
 
@@ -63,7 +69,11 @@ def handle_recording():
     next_question = get_next_question(new_step)
 
     if next_question:
-        synthesize_text(next_question["text"], "question.wav")
+        # Use the chat model to naturally acknowledge the answer
+        # and smoothly ask the next question, instead of reading
+        # the raw question text robotically.
+        ai_reply = chat_with_ai(transcript, next_question["text"])
+        synthesize_text(ai_reply, "question.wav")
         resp.play(request.url_root + "static_audio/question.wav")
         resp.record(
             action="/handle-recording",
@@ -101,6 +111,28 @@ def synthesize_text(text, filename):
     with open(filepath, "wb") as f:
         f.write(response.content)
     return filepath
+
+
+def chat_with_ai(user_input, next_question_text):
+    system_prompt = (
+        "You are a friendly AI flight booking assistant speaking on a phone call. "
+        "The user just answered your previous question. "
+        "Briefly and naturally acknowledge their answer in ONE short sentence, "
+        "then smoothly ask this next question: " + next_question_text + " "
+        "Keep your entire reply under 25 words. Do not add extra questions."
+    )
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    data = {
+        "model": GROQ_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_input}
+        ]
+    }
+    response = requests.post(url, headers=headers, json=data)
+    return response.json()["choices"][0]["message"]["content"]
 
 
 if __name__ == "__main__":
