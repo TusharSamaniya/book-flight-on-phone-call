@@ -5,13 +5,9 @@ from twilio.twiml.voice_response import VoiceResponse
 
 from config import GROQ_API_KEY, GROQ_STT_MODEL, GROQ_TTS_MODEL, GROQ_TTS_VOICE
 from conversation import QUESTIONS, get_next_question
+from db import create_session, get_session, update_session
 
 app = Flask(__name__)
-
-# In-memory session tracker: { call_sid: {"step": int, "responses": {...}} }
-# This resets whenever the server restarts — Task 6 will replace this
-# with permanent storage in Supabase.
-call_sessions = {}
 
 
 @app.route("/static_audio/<filename>")
@@ -22,7 +18,9 @@ def serve_audio(filename):
 @app.route("/voice", methods=["POST"])
 def voice():
     call_sid = request.form.get("CallSid")
-    call_sessions[call_sid] = {"step": 0, "responses": {}}
+    caller_number = request.form.get("From")
+
+    create_session(call_sid, caller_number)
 
     first_question = get_next_question(0)
     synthesize_text(first_question["text"], "question.wav")
@@ -51,15 +49,18 @@ def handle_recording():
     transcript = transcribe_audio("temp_recording.wav")
     print("User said:", transcript)
 
-    session = call_sessions.get(call_sid, {"step": 0, "responses": {}})
+    session = get_session(call_sid)
     current_step = session["step"]
+    responses = session["responses"]
+
     current_question = QUESTIONS[current_step]
-    session["responses"][current_question["key"]] = transcript
-    session["step"] += 1
-    call_sessions[call_sid] = session
+    responses[current_question["key"]] = transcript
+    new_step = current_step + 1
+
+    update_session(call_sid, new_step, responses)
 
     resp = VoiceResponse()
-    next_question = get_next_question(session["step"])
+    next_question = get_next_question(new_step)
 
     if next_question:
         synthesize_text(next_question["text"], "question.wav")
@@ -73,7 +74,7 @@ def handle_recording():
     else:
         synthesize_text("Thank you! I have all the details I need. Goodbye for now.", "reply.wav")
         resp.play(request.url_root + "static_audio/reply.wav")
-        print("Final responses:", session["responses"])
+        print("Final responses:", responses)
 
     return str(resp)
 
