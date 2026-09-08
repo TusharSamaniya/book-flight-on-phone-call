@@ -2,6 +2,8 @@ import os
 import requests
 from flask import Flask, request, send_from_directory, jsonify
 from flights import search_flights, summarize_flights_for_caller
+from flights import search_flights, summarize_flights_for_caller, parse_user_selection
+from db import create_session, get_session, update_session, save_chosen_flight, get_offers_from_session
 
 from config import (
     GROQ_API_KEY,
@@ -87,17 +89,58 @@ def recording():
     session = get_session(call_sid)
     current_step = session["step"]
     responses = session["responses"]
-    current_question = QUESTIONS[current_step]
 
-    # If we couldn't understand the caller, ask them to repeat
-    # WITHOUT moving on to the next question.
+    SELECTION_STEP = len(QUESTIONS) + 1
+
+    # --- SELECTION MODE: user is choosing a flight ---
+    if current_step == SELECTION_STEP:
+        offers = get_offers_from_session(call_sid)
+        chosen = parse_user_selection(transcript, offers)
+
+        if chosen:
+            save_chosen_flight(call_sid, chosen)
+            confirmation = (
+                f"Perfect! I've selected the {chosen['airline']} flight "
+                f"departing at {chosen['departure_time']} "
+                f"for {chosen['price']}. "
+                f"Let me now collect your passenger details."
+            )
+            synthesize_text(confirmation, "reply.wav")
+            new_ncco = [
+                {"action": "stream",
+                 "streamUrl": [request.url_root + "static_audio/reply.wav"]}
+            ]
+        else:
+            synthesize_text(
+                "Sorry, I didn't catch that. "
+                "Could you say Option 1, Option 2, or Option 3?",
+                "retry.wav"
+            )
+            new_ncco = [
+                {"action": "stream",
+                 "streamUrl": [request.url_root + "static_audio/retry.wav"]},
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+        update_live_call(call_sid, new_ncco)
+        return "", 200
+
+    # --- QUESTION MODE: still collecting trip details ---
     if not transcript or transcript.strip() == "":
         synthesize_text(
             "Sorry, I didn't catch that. Could you please repeat?",
             "retry.wav"
         )
         new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/retry.wav"]},
+            {"action": "stream",
+             "streamUrl": [request.url_root + "static_audio/retry.wav"]},
             {
                 "action": "record",
                 "eventUrl": [request.url_root + "recording"],
@@ -111,7 +154,7 @@ def recording():
         update_live_call(call_sid, new_ncco)
         return "", 200
 
-    # We got a valid answer — save it and move forward.
+    current_question = QUESTIONS[current_step]
     responses[current_question["key"]] = transcript
     new_step = current_step + 1
     update_session(call_sid, new_step, responses)
@@ -121,10 +164,10 @@ def recording():
     if next_question:
         ai_reply = chat_with_ai(transcript, next_question["text"])
         text_to_speak = ai_reply if ai_reply else next_question["text"]
-
         synthesize_text(text_to_speak, "question.wav")
         new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/question.wav"]},
+            {"action": "stream",
+             "streamUrl": [request.url_root + "static_audio/question.wav"]},
             {
                 "action": "record",
                 "eventUrl": [request.url_root + "recording"],
@@ -136,20 +179,23 @@ def recording():
             }
         ]
     else:
-        # All questions answered — now search for flights
+        # All 8 questions done — search for flights
         print("All responses collected:", responses)
         top_3 = search_flights(responses)
 
         if top_3:
             summary = summarize_flights_for_caller(top_3)
-            # Store offers in session for when user makes their choice
-            update_session(call_sid, new_step, responses, top_3)
+            update_session(call_sid, SELECTION_STEP, responses, top_3)
         else:
-            summary = "I'm sorry, I couldn't find any flights for those details. Please try calling again."
+            summary = (
+                "I'm sorry, I couldn't find any flights for those details. "
+                "Please try calling again."
+            )
 
         synthesize_text(summary, "reply.wav")
         new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/reply.wav"]},
+            {"action": "stream",
+             "streamUrl": [request.url_root + "static_audio/reply.wav"]},
             {
                 "action": "record",
                 "eventUrl": [request.url_root + "recording"],
@@ -163,7 +209,6 @@ def recording():
 
     update_live_call(call_sid, new_ncco)
     return "", 200
-
 
 def download_vonage_recording(recording_url):
     token = generate_vonage_jwt()

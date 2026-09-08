@@ -54,3 +54,31 @@ def update_session(call_sid, step, responses, offers=None):
     conn.commit()
     cur.close()
     conn.close()
+
+def save_chosen_flight(call_sid, chosen_offer):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE sessions
+        SET chosen_offer = %s
+        WHERE call_sid = %s
+        """,
+        (json.dumps(chosen_offer), call_sid)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_offers_from_session(call_sid):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT offers FROM sessions WHERE call_sid = %s",
+        (call_sid,)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else []

@@ -248,3 +248,40 @@ def summarize_flights_for_caller(top_3_offers):
     )
 
     return ask_groq_simple(system_prompt, options_text)
+
+
+def parse_user_selection(user_input, top_3_offers):
+    """
+    Figures out which flight option the caller chose based on
+    what they said (e.g. "Option 2", "Emirates", "the cheap one").
+    Returns the chosen offer dictionary, or None if unclear.
+    """
+    if not top_3_offers:
+        return None
+
+    # Build a description of options to help the AI understand context
+    options_text = ""
+    for i, offer in enumerate(top_3_offers, start=1):
+        options_text += (
+            f"Option {i}: {offer['airline']}, "
+            f"departs {offer['departure_time']}, "
+            f"price {offer['price']}. "
+        )
+
+    system_prompt = (
+        "The user was presented with these flight options: "
+        + options_text +
+        "Based on what the user said, reply with ONLY the number "
+        "1, 2, or 3 representing which option they chose. "
+        "If unclear, reply with 0."
+    )
+
+    reply = ask_groq_simple(system_prompt, user_input)
+
+    try:
+        choice = int(reply.strip())
+        if 1 <= choice <= len(top_3_offers):
+            return top_3_offers[choice - 1]
+        return None
+    except ValueError:
+        return None
