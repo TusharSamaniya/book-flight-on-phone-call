@@ -217,3 +217,34 @@ def ask_groq_simple(system_prompt, user_text):
     }
     response = requests.post(url, headers=headers, json=data)
     return response.json()["choices"][0]["message"]["content"]
+
+def summarize_flights_for_caller(top_3_offers):
+    """
+    Converts our list of top 3 flight offers into a natural,
+    conversational summary the AI agent reads aloud to the caller.
+    Uses the Groq chat model to make it sound human, not robotic.
+    """
+    if not top_3_offers:
+        return "I'm sorry, I couldn't find any flights for those details."
+
+    # First build a plain text description of the options
+    options_text = ""
+    for i, offer in enumerate(top_3_offers, start=1):
+        options_text += (
+            f"Option {i}: {offer['airline']}, "
+            f"departs {offer['departure_time']}, "
+            f"arrives {offer['arrival_time']}, "
+            f"duration {offer['duration']}, "
+            f"price {offer['price']}. "
+        )
+
+    # Then ask the chat model to rephrase it naturally
+    system_prompt = (
+        "You are a friendly flight booking assistant on a phone call. "
+        "Read out these flight options naturally and clearly, "
+        "as if speaking to someone on the phone. "
+        "Keep it concise — one sentence per option. "
+        "End by asking: Which option would you like to book?"
+    )
+
+    return ask_groq_simple(system_prompt, options_text)

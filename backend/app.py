@@ -1,6 +1,7 @@
 import os
 import requests
 from flask import Flask, request, send_from_directory, jsonify
+from flights import search_flights, summarize_flights_for_caller
 
 from config import (
     GROQ_API_KEY,
@@ -135,11 +136,30 @@ def recording():
             }
         ]
     else:
-        synthesize_text("Thank you! I have all the details I need. Goodbye for now.", "reply.wav")
+        # All questions answered — now search for flights
+        print("All responses collected:", responses)
+        top_3 = search_flights(responses)
+
+        if top_3:
+            summary = summarize_flights_for_caller(top_3)
+            # Store offers in session for when user makes their choice
+            update_session(call_sid, new_step, responses, top_3)
+        else:
+            summary = "I'm sorry, I couldn't find any flights for those details. Please try calling again."
+
+        synthesize_text(summary, "reply.wav")
         new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/reply.wav"]}
+            {"action": "stream", "streamUrl": [request.url_root + "static_audio/reply.wav"]},
+            {
+                "action": "record",
+                "eventUrl": [request.url_root + "recording"],
+                "eventMethod": "POST",
+                "beepStart": True,
+                "endOnSilence": 3,
+                "timeOut": 10,
+                "format": "wav"
+            }
         ]
-        print("Final responses:", responses)
 
     update_live_call(call_sid, new_ncco)
     return "", 200

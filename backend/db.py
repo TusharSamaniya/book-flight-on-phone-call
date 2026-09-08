@@ -40,16 +40,16 @@ def get_session(call_sid):
     return {"step": current_step, "responses": responses}
 
 
-def update_session(call_sid, step, responses):
+def update_session(call_sid, step, responses, offers=None):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """
         UPDATE sessions
-        SET current_step = %s, responses = %s
+        SET current_step = %s, responses = %s, offers = %s
         WHERE call_sid = %s
         """,
-        (step, json.dumps(responses), call_sid)
+        (step, json.dumps(responses), json.dumps(offers or []), call_sid)
     )
     conn.commit()
     cur.close()
