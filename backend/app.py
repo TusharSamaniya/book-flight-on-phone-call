@@ -1,7 +1,6 @@
 import os
 import requests
-from flask import Flask, request, send_from_directory
-from twilio.twiml.voice_response import VoiceResponse
+from flask import Flask, request, send_from_directory, jsonify
 
 from config import (
     GROQ_API_KEY,
@@ -12,6 +11,7 @@ from config import (
 )
 from conversation import QUESTIONS, get_next_question
 from db import create_session, get_session, update_session
+from vonage_auth import generate_vonage_jwt
 
 app = Flask(__name__)
 
@@ -21,36 +21,64 @@ def serve_audio(filename):
     return send_from_directory("static_audio", filename)
 
 
-@app.route("/voice", methods=["POST"])
-def voice():
-    call_sid = request.form.get("CallSid")
-    caller_number = request.form.get("From")
+# ---------------------------------------------------------------------
+# Vonage calls this the moment someone dials our number. We must reply
+# with an NCCO (a JSON list of instructions) telling Vonage what to do.
+# ---------------------------------------------------------------------
+@app.route("/answer", methods=["GET", "POST"])
+def answer():
+    call_sid = request.args.get("conversation_uuid") or request.form.get("conversation_uuid")
+    caller_number = request.args.get("from") or request.form.get("from")
 
     create_session(call_sid, caller_number)
 
     first_question = get_next_question(0)
     synthesize_text(first_question["text"], "question.wav")
 
-    resp = VoiceResponse()
-    resp.play(request.url_root + "static_audio/question.wav")
-    resp.record(
-        action="/handle-recording",
-        method="POST",
-        max_length=10,
-        play_beep=True
-    )
-    return str(resp)
+    ncco = [
+        {
+            "action": "stream",
+            "streamUrl": [request.url_root + "static_audio/question.wav"]
+        },
+        {
+            "action": "record",
+            "eventUrl": [request.url_root + "recording"],
+            "eventMethod": "POST",
+            "beepStart": True,
+            "endOnSilence": 3,
+            "timeOut": 10,
+            "format": "wav"
+        }
+    ]
+    return jsonify(ncco)
 
 
-@app.route("/handle-recording", methods=["POST"])
-def handle_recording():
-    call_sid = request.form.get("CallSid")
-    recording_url = request.form.get("RecordingUrl")
-    audio_url = recording_url + ".wav"
+# ---------------------------------------------------------------------
+# Vonage's generic call-status webhook (call started, ringing,
+# answered, completed, etc). We don't need to act on these events
+# right now — we just need this endpoint to exist and respond 200,
+# or Vonage will keep retrying and log errors.
+# ---------------------------------------------------------------------
+@app.route("/event", methods=["GET", "POST"])
+def event():
+    return "", 200
 
-    audio_response = requests.get(audio_url)
+
+# ---------------------------------------------------------------------
+# Vonage calls this once a recording is ready. Unlike Twilio, this
+# does NOT pause the live call waiting for our reply — so once we've
+# figured out the next question, we have to actively reach back out
+# and update the ongoing call using Vonage's call-control API.
+# ---------------------------------------------------------------------
+@app.route("/recording", methods=["POST"])
+def recording():
+    data = request.get_json()
+    call_sid = data.get("conversation_uuid")
+    recording_url = data.get("recording_url")
+
+    audio_bytes = download_vonage_recording(recording_url)
     with open("temp_recording.wav", "wb") as f:
-        f.write(audio_response.content)
+        f.write(audio_bytes)
 
     transcript = transcribe_audio("temp_recording.wav")
     print("User said:", transcript)
@@ -60,8 +88,6 @@ def handle_recording():
     responses = session["responses"]
     current_question = QUESTIONS[current_step]
 
-    resp = VoiceResponse()
-
     # If we couldn't understand the caller, ask them to repeat
     # WITHOUT moving on to the next question.
     if not transcript or transcript.strip() == "":
@@ -69,14 +95,20 @@ def handle_recording():
             "Sorry, I didn't catch that. Could you please repeat?",
             "retry.wav"
         )
-        resp.play(request.url_root + "static_audio/retry.wav")
-        resp.record(
-            action="/handle-recording",
-            method="POST",
-            max_length=10,
-            play_beep=True
-        )
-        return str(resp)
+        new_ncco = [
+            {"action": "stream", "streamUrl": [request.url_root + "static_audio/retry.wav"]},
+            {
+                "action": "record",
+                "eventUrl": [request.url_root + "recording"],
+                "eventMethod": "POST",
+                "beepStart": True,
+                "endOnSilence": 3,
+                "timeOut": 10,
+                "format": "wav"
+            }
+        ]
+        update_live_call(call_sid, new_ncco)
+        return "", 200
 
     # We got a valid answer — save it and move forward.
     responses[current_question["key"]] = transcript
@@ -87,37 +119,59 @@ def handle_recording():
 
     if next_question:
         ai_reply = chat_with_ai(transcript, next_question["text"])
-        # Fall back to the plain question text if the chat model failed.
         text_to_speak = ai_reply if ai_reply else next_question["text"]
 
         synthesize_text(text_to_speak, "question.wav")
-        resp.play(request.url_root + "static_audio/question.wav")
-        resp.record(
-            action="/handle-recording",
-            method="POST",
-            max_length=10,
-            play_beep=True
-        )
+        new_ncco = [
+            {"action": "stream", "streamUrl": [request.url_root + "static_audio/question.wav"]},
+            {
+                "action": "record",
+                "eventUrl": [request.url_root + "recording"],
+                "eventMethod": "POST",
+                "beepStart": True,
+                "endOnSilence": 3,
+                "timeOut": 10,
+                "format": "wav"
+            }
+        ]
     else:
         synthesize_text("Thank you! I have all the details I need. Goodbye for now.", "reply.wav")
-        resp.play(request.url_root + "static_audio/reply.wav")
+        new_ncco = [
+            {"action": "stream", "streamUrl": [request.url_root + "static_audio/reply.wav"]}
+        ]
         print("Final responses:", responses)
 
-    return str(resp)
+    update_live_call(call_sid, new_ncco)
+    return "", 200
 
 
-@app.errorhandler(Exception)
-def handle_unexpected_error(error):
-    # Catches ANY unhandled crash in our app, so Twilio never just
-    # drops the call silently. The caller hears a polite apology
-    # instead of dead air or an abrupt hangup.
-    print("Unexpected error:", error)
-    resp = VoiceResponse()
-    resp.say(
-        "Sorry, something went wrong on our end. Please try calling again shortly.",
-        voice="alice"
-    )
-    return str(resp)
+def download_vonage_recording(recording_url):
+    token = generate_vonage_jwt()
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(recording_url, headers=headers)
+    return response.content
+
+
+def update_live_call(call_sid, new_ncco):
+    """
+    Pushes new instructions to a call that's already in progress —
+    this is how we 'continue the conversation' on Vonage, since
+    /recording doesn't pause the call the way Twilio's did.
+    """
+    token = generate_vonage_jwt()
+    url = f"https://api.nexmo.com/v1/calls/{call_sid}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "action": "transfer",
+        "destination": {
+            "type": "ncco",
+            "ncco": new_ncco
+        }
+    }
+    requests.put(url, headers=headers, json=body)
 
 
 def transcribe_audio(file_path):
@@ -157,7 +211,6 @@ def chat_with_ai(user_input, next_question_text):
             "then smoothly ask this next question: " + next_question_text + " "
             "Keep your entire reply under 25 words. Do not add extra questions."
         )
-
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
         data = {
@@ -172,6 +225,12 @@ def chat_with_ai(user_input, next_question_text):
     except Exception as e:
         print("Chat model error:", e)
         return None
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    print("Unexpected error:", error)
+    return "", 200
 
 
 if __name__ == "__main__":

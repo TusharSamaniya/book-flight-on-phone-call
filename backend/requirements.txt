@@ -1,5 +1,7 @@
 flask
-twilio
+vonage
+pyjwt
+cryptography
 razorpay
 duffel-api
 sendgrid
