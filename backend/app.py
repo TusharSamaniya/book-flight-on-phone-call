@@ -179,33 +179,62 @@ def recording():
             }
         ]
     else:
-        # All 8 questions done — search for flights
         print("All responses collected:", responses)
-        top_3 = search_flights(responses)
+        top_3, error = search_flights(responses)
 
-        if top_3:
+        if error == "no_flights_found":
+            # No flights found — ask if they want to try different dates
+            synthesize_text(
+                "I'm sorry, I couldn't find any flights for those dates. "
+                "Would you like to try a different travel date?",
+                "reply.wav"
+            )
+            # Reset step back to travel_date question (step 2)
+            update_session(call_sid, 2, responses)
+            new_ncco = [
+                {"action": "stream",
+                 "streamUrl": [request.url_root + "static_audio/reply.wav"]},
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+
+        elif error:
+            # Some other error (validation failure or API error)
+            synthesize_text(
+                "I'm sorry, something went wrong while searching for flights. "
+                "Please try calling again shortly.",
+                "reply.wav"
+            )
+            new_ncco = [
+                {"action": "stream",
+                 "streamUrl": [request.url_root + "static_audio/reply.wav"]}
+            ]
+
+        else:
+            # Success — summarize and move to selection step
             summary = summarize_flights_for_caller(top_3)
             update_session(call_sid, SELECTION_STEP, responses, top_3)
-        else:
-            summary = (
-                "I'm sorry, I couldn't find any flights for those details. "
-                "Please try calling again."
-            )
-
-        synthesize_text(summary, "reply.wav")
-        new_ncco = [
-            {"action": "stream",
-             "streamUrl": [request.url_root + "static_audio/reply.wav"]},
-            {
-                "action": "record",
-                "eventUrl": [request.url_root + "recording"],
-                "eventMethod": "POST",
-                "beepStart": True,
-                "endOnSilence": 3,
-                "timeOut": 10,
-                "format": "wav"
-            }
-        ]
+            synthesize_text(summary, "reply.wav")
+            new_ncco = [
+                {"action": "stream",
+                 "streamUrl": [request.url_root + "static_audio/reply.wav"]},
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
 
     update_live_call(call_sid, new_ncco)
     return "", 200

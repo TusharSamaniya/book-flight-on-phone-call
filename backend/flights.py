@@ -12,18 +12,69 @@ DUFFEL_HEADERS = {
     "Accept": "application/json"
 }
 
+def validate_search_inputs(responses):
+    """
+    Checks the caller's answers before we even send them to Duffel.
+    Returns a list of problems found — empty list means everything is fine.
+    """
+    from datetime import datetime, date
+
+    problems = []
+
+    # Check origin and destination aren't the same
+    origin = responses.get("origin", "").strip().lower()
+    destination = responses.get("destination", "").strip().lower()
+    if origin == destination:
+        problems.append("origin and destination are the same city")
+
+    # Check date is not in the past
+    try:
+        travel_date_str = extract_date(responses.get("travel_date", ""))
+        travel_date = datetime.strptime(travel_date_str, "%Y-%m-%d").date()
+        if travel_date < date.today():
+            problems.append("travel date is in the past")
+    except Exception:
+        problems.append("travel date could not be understood")
+
+    # Check passenger count is reasonable
+    try:
+        count = extract_passenger_count(responses.get("passengers", "1"))
+        if count < 1 or count > 9:
+            problems.append("passenger count must be between 1 and 9")
+    except Exception:
+        problems.append("passenger count could not be understood")
+
+    return problems
+
 
 def search_flights(responses):
     """
-    Main entry point — takes the raw session responses from the phone
-    call, converts them into structured data, searches Duffel, and
-    returns the top 3 flight options ready to read aloud.
+    Main entry point — validates inputs first, then searches Duffel.
+    Returns a tuple: (top_3_offers, error_message)
+    If successful: ([offer1, offer2, offer3], None)
+    If failed: ([], "reason why")
     """
-    search_request = build_search_request(responses)
-    offer_request_id = create_offer_request(search_request)
-    offers = get_offers(offer_request_id)
-    top_3 = select_top_3(offers)
-    return top_3
+    # Validate inputs before calling Duffel
+    problems = validate_search_inputs(responses)
+    if problems:
+        reason = ", ".join(problems)
+        print("Validation failed:", reason)
+        return [], f"There was an issue with your trip details: {reason}."
+
+    try:
+        search_request = build_search_request(responses)
+        offer_request_id = create_offer_request(search_request)
+        offers = get_offers(offer_request_id)
+
+        if not offers:
+            return [], "no_flights_found"
+
+        top_3 = select_top_3(offers)
+        return top_3, None
+
+    except Exception as e:
+        print("Duffel API error:", e)
+        return [], "api_error"
 
 
 def create_offer_request(search_request):
