@@ -1,20 +1,25 @@
 """
-Temporary test — confirms our Duffel client is set up correctly
-and can successfully talk to Duffel's servers.
-
+Temporary test — confirms our Duffel direct API connection works.
 Run with: python test_duffel_connection.py
 Delete this file once confirmed working.
 """
 
-from flights import duffel
+import requests
+from config import DUFFEL_API_KEY
+
+url = "https://api.duffel.com/air/airlines"
+headers = {
+    "Authorization": f"Bearer {DUFFEL_API_KEY}",
+    "Duffel-Version": "v2",
+    "Accept": "application/json"
+}
 
 try:
-    # Airlines is a simple, harmless read-only endpoint —
-    # good for just checking our connection/auth works.
-    airlines = duffel.airlines.list()
-    first_five = list(airlines)[:5]
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    airlines = data["data"][:5]
     print("Connection successful! Sample airlines from Duffel:")
-    for airline in first_five:
-        print("-", airline.name)
+    for airline in airlines:
+        print("-", airline["name"])
 except Exception as e:
     print("Connection failed:", e)

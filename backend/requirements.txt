@@ -3,12 +3,9 @@ vonage
 pyjwt
 cryptography
 razorpay
-duffel-api
-sendgrid
+resend
 psycopg2-binary
 python-dotenv
-openai
-azure-cognitiveservices-speech
-resend
 groq
 gunicorn
+requests
