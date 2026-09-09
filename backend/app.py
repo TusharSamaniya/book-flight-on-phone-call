@@ -23,9 +23,12 @@ from db import (
     get_offers_from_session,
     save_passenger_info,
     mark_session_ready_for_payment,
+    save_payment,
+    get_chosen_offer_from_session,
 )
 from flights import search_flights, summarize_flights_for_caller, parse_user_selection
 from passenger import validate_passenger_info, get_validation_message, clean_email_transcript
+from payment import create_payment_order, simulate_payment_success, parse_amount_to_paise
 from vonage_auth import generate_vonage_jwt
 
 app = Flask(__name__)
@@ -219,11 +222,32 @@ def recording():
                     f"I have all your details. "
                     f"We will now process your payment. Please hold on."
                 )
-                synthesize_text(confirmation, "reply.wav")
+                chosen_offer = get_chosen_offer_from_session(call_sid)
+                payment_result = process_payment(call_sid, chosen_offer)
+
+                if payment_result["status"] == "success":
+                    payment_text = (
+                        "Your demo payment was successful. "
+                        "Please note this is a simulation — "
+                        "no real charge has been made. "
+                        f"Your booking ID is {payment_result['payment_id']}. "
+                        "You will receive an SMS confirmation shortly."
+                    )
+                else:
+                    payment_text = (
+                        "I'm sorry, the payment did not go through. "
+                        "Please try calling again."
+                    )
+
+                synthesize_text(payment_text, "payment.wav")
                 new_ncco = [
                     {
                         "action": "stream",
                         "streamUrl": [request.url_root + "static_audio/reply.wav"]
+                    },
+                    {
+                        "action": "stream",
+                        "streamUrl": [request.url_root + "static_audio/payment.wav"]
                     }
                 ]
 
@@ -507,6 +531,38 @@ def chat_with_ai(user_input, next_question_text):
 def handle_unexpected_error(error):
     print("Unexpected error:", error)
     return "", 200
+
+def process_payment(call_sid, chosen_offer):
+    """
+    Creates a Razorpay order, simulates payment success,
+    saves the result to Supabase, and returns the result.
+    """
+    try:
+        order = create_payment_order(chosen_offer)
+
+        if not order:
+            return {"status": "failed", "payment_id": None}
+
+        payment_result = simulate_payment_success(order["id"])
+
+        currency, amount_paise = parse_amount_to_paise(
+            chosen_offer.get("price", "INR 1.00")
+        )
+
+        save_payment(
+            call_sid=call_sid,
+            order_id=order["id"],
+            payment_id=payment_result["payment_id"],
+            amount=amount_paise,
+            currency=currency,
+            status=payment_result["status"]
+        )
+
+        return payment_result
+
+    except Exception as e:
+        print("Payment processing error:", e)
+        return {"status": "failed", "payment_id": None}
 
 
 if __name__ == "__main__":
