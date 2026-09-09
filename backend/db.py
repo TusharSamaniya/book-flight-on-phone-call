@@ -115,3 +115,31 @@ def mark_session_ready_for_payment(call_sid):
     conn.commit()
     cur.close()
     conn.close()
+
+def save_payment(call_sid, order_id, payment_id, amount, currency, status):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO payments
+            (call_sid, order_id, payment_id, amount, currency, status)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (call_sid, order_id, payment_id, amount, currency, status)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_chosen_offer_from_session(call_sid):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT chosen_offer FROM sessions WHERE call_sid = %s",
+        (call_sid,)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else None
