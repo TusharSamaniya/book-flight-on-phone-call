@@ -25,11 +25,14 @@ from db import (
     mark_session_ready_for_payment,
     save_payment,
     get_chosen_offer_from_session,
+    get_connection,
 )
 from flights import search_flights, summarize_flights_for_caller, parse_user_selection
 from passenger import validate_passenger_info, get_validation_message, clean_email_transcript
 from payment import create_payment_order, simulate_payment_success, parse_amount_to_paise
 from vonage_auth import generate_vonage_jwt
+
+from booking import complete_booking
 
 app = Flask(__name__)
 
@@ -226,20 +229,25 @@ def recording():
                 payment_result = process_payment(call_sid, chosen_offer)
 
                 if payment_result["status"] == "success":
-                    payment_text = (
-                        "Your demo payment was successful. "
-                        "Please note this is a simulation — "
-                        "no real charge has been made. "
-                        f"Your booking ID is {payment_result['payment_id']}. "
-                        "You will receive an SMS confirmation shortly."
+                    # Complete the booking — create record, send SMS + email
+                    dashboard_url = request.url_root + "booking"
+                    booking_result = complete_booking(
+                        db_conn_func=get_connection,
+                        call_sid=call_sid,
+                        chosen_offer=chosen_offer,
+                        trip_responses=responses,
+                        passenger_responses=passenger_responses,
+                        payment_result=payment_result,
+                        dashboard_url=dashboard_url
                     )
+                    voice_text = booking_result["voice_text"]
                 else:
-                    payment_text = (
+                    voice_text = (
                         "I'm sorry, the payment did not go through. "
                         "Please try calling again."
                     )
 
-                synthesize_text(payment_text, "payment.wav")
+                synthesize_text(voice_text, "confirmation.wav")
                 new_ncco = [
                     {
                         "action": "stream",
@@ -247,7 +255,7 @@ def recording():
                     },
                     {
                         "action": "stream",
-                        "streamUrl": [request.url_root + "static_audio/payment.wav"]
+                        "streamUrl": [request.url_root + "static_audio/confirmation.wav"]
                     }
                 ]
 
