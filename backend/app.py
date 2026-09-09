@@ -9,8 +9,23 @@ from config import (
     GROQ_TTS_VOICE,
     GROQ_CHAT_MODEL,
 )
-from conversation import QUESTIONS, get_next_question
-from db import create_session, get_session, update_session
+from conversation import (
+    QUESTIONS,
+    get_next_question,
+    PASSENGER_QUESTIONS,
+    get_next_passenger_question,
+)
+from db import (
+    create_session,
+    get_session,
+    update_session,
+    save_chosen_flight,
+    get_offers_from_session,
+    save_passenger_info,
+    mark_session_ready_for_payment,
+)
+from flights import search_flights, summarize_flights_for_caller, parse_user_selection
+from passenger import validate_passenger_info, get_validation_message, clean_email_transcript
 from vonage_auth import generate_vonage_jwt
 
 app = Flask(__name__)
@@ -22,8 +37,7 @@ def serve_audio(filename):
 
 
 # ---------------------------------------------------------------------
-# Vonage calls this the moment someone dials our number. We must reply
-# with an NCCO (a JSON list of instructions) telling Vonage what to do.
+# Vonage calls this the moment someone dials our number.
 # ---------------------------------------------------------------------
 @app.route("/answer", methods=["GET", "POST"])
 def answer():
@@ -54,10 +68,7 @@ def answer():
 
 
 # ---------------------------------------------------------------------
-# Vonage's generic call-status webhook (call started, ringing,
-# answered, completed, etc). We don't need to act on these events
-# right now — we just need this endpoint to exist and respond 200,
-# or Vonage will keep retrying and log errors.
+# Vonage generic call-status webhook — must exist and return 200.
 # ---------------------------------------------------------------------
 @app.route("/event", methods=["GET", "POST"])
 def event():
@@ -65,10 +76,8 @@ def event():
 
 
 # ---------------------------------------------------------------------
-# Vonage calls this once a recording is ready. Unlike Twilio, this
-# does NOT pause the live call waiting for our reply — so once we've
-# figured out the next question, we have to actively reach back out
-# and update the ongoing call using Vonage's call-control API.
+# Vonage calls this once a recording is ready.
+# We process the audio then push new instructions back to the live call.
 # ---------------------------------------------------------------------
 @app.route("/recording", methods=["POST"])
 def recording():
@@ -76,27 +85,234 @@ def recording():
     call_sid = data.get("conversation_uuid")
     recording_url = data.get("recording_url")
 
+    # Download and save the audio file
     audio_bytes = download_vonage_recording(recording_url)
     with open("temp_recording.wav", "wb") as f:
         f.write(audio_bytes)
 
+    # Transcribe using Groq Whisper
     transcript = transcribe_audio("temp_recording.wav")
     print("User said:", transcript)
 
+    # Load current session state
     session = get_session(call_sid)
     current_step = session["step"]
     responses = session["responses"]
-    current_question = QUESTIONS[current_step]
 
-    # If we couldn't understand the caller, ask them to repeat
-    # WITHOUT moving on to the next question.
+    # --- Step number reference ---
+    # Steps 0-7   → trip detail questions (8 questions)
+    # Step 8      → flight search + summarize (auto, no recording)
+    # Step 9      → flight selection (SELECTION_STEP)
+    # Steps 10-13 → passenger info questions (4 questions)
+    # Step 14+    → ready for payment
+    SELECTION_STEP = len(QUESTIONS) + 1          # = 9
+    PASSENGER_START_STEP = SELECTION_STEP + 1    # = 10
+
+    # ===================================================================
+    # MODE 1: PASSENGER INFO COLLECTION (steps 10-13)
+    # ===================================================================
+    if current_step >= PASSENGER_START_STEP:
+        passenger_step = current_step - PASSENGER_START_STEP
+        passenger_responses = responses.get("passenger_info", {})
+        current_p_question = PASSENGER_QUESTIONS[passenger_step]
+
+        # Handle empty transcript — ask same question again
+        if not transcript or transcript.strip() == "":
+            synthesize_text(
+                "Sorry, I didn't catch that. Could you please repeat?",
+                "retry.wav"
+            )
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/retry.wav"]
+                },
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+            update_live_call(call_sid, new_ncco)
+            return "", 200
+
+        # Clean email transcripts specially
+        # (Whisper transcribes "tushar at gmail dot com" literally)
+        if current_p_question["key"] == "email":
+            transcript = clean_email_transcript(transcript)
+
+        # Save this answer into passenger_info sub-dict
+        passenger_responses[current_p_question["key"]] = transcript
+        responses["passenger_info"] = passenger_responses
+
+        next_p_question = get_next_passenger_question(passenger_step + 1)
+
+        if next_p_question:
+            # Still more passenger questions to ask
+            new_step = current_step + 1
+            update_session(call_sid, new_step, responses)
+
+            ai_reply = chat_with_ai(transcript, next_p_question["text"])
+            text_to_speak = ai_reply if ai_reply else next_p_question["text"]
+            synthesize_text(text_to_speak, "p_question.wav")
+
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/p_question.wav"]
+                },
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+
+        else:
+            # All 4 passenger questions answered — validate them
+            errors = validate_passenger_info(passenger_responses)
+
+            if errors:
+                # Find the first invalid field and ask for it again
+                first_error_field = list(errors.keys())[0]
+                retry_msg = get_validation_message(first_error_field)
+                synthesize_text(retry_msg, "p_question.wav")
+
+                # Jump back to that specific question's step number
+                error_step = PASSENGER_START_STEP + [
+                    q["key"] for q in PASSENGER_QUESTIONS
+                ].index(first_error_field)
+                update_session(call_sid, error_step, responses)
+
+                new_ncco = [
+                    {
+                        "action": "stream",
+                        "streamUrl": [request.url_root + "static_audio/p_question.wav"]
+                    },
+                    {
+                        "action": "record",
+                        "eventUrl": [request.url_root + "recording"],
+                        "eventMethod": "POST",
+                        "beepStart": True,
+                        "endOnSilence": 3,
+                        "timeOut": 10,
+                        "format": "wav"
+                    }
+                ]
+
+            else:
+                # All valid — save to Supabase and mark ready for payment
+                save_passenger_info(call_sid, passenger_responses)
+                mark_session_ready_for_payment(call_sid)
+                update_session(call_sid, current_step + 1, responses)
+
+                confirmation = (
+                    f"Thank you, {passenger_responses['full_name']}! "
+                    f"I have all your details. "
+                    f"We will now process your payment. Please hold on."
+                )
+                synthesize_text(confirmation, "reply.wav")
+                new_ncco = [
+                    {
+                        "action": "stream",
+                        "streamUrl": [request.url_root + "static_audio/reply.wav"]
+                    }
+                ]
+
+        update_live_call(call_sid, new_ncco)
+        return "", 200
+
+    # ===================================================================
+    # MODE 2: FLIGHT SELECTION (step 9)
+    # ===================================================================
+    if current_step == SELECTION_STEP:
+        offers = get_offers_from_session(call_sid)
+        chosen = parse_user_selection(transcript, offers)
+
+        if chosen:
+            save_chosen_flight(call_sid, chosen)
+            update_session(call_sid, PASSENGER_START_STEP, responses)
+
+            confirmation = (
+                f"Perfect! I've selected the {chosen['airline']} flight "
+                f"departing at {chosen['departure_time']} "
+                f"for {chosen['price']}. "
+            )
+
+            # Immediately ask the first passenger question
+            first_p_question = get_next_passenger_question(0)
+            synthesize_text(confirmation, "reply.wav")
+            synthesize_text(first_p_question["text"], "p_question.wav")
+
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/reply.wav"]
+                },
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/p_question.wav"]
+                },
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+
+        else:
+            # Couldn't understand which option — ask again
+            synthesize_text(
+                "Sorry, I didn't catch that. "
+                "Could you say Option 1, Option 2, or Option 3?",
+                "retry.wav"
+            )
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/retry.wav"]
+                },
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+
+        update_live_call(call_sid, new_ncco)
+        return "", 200
+
+    # ===================================================================
+    # MODE 3: TRIP DETAIL QUESTIONS (steps 0-7)
+    # ===================================================================
+
+    # Handle empty transcript — ask same question again
     if not transcript or transcript.strip() == "":
         synthesize_text(
             "Sorry, I didn't catch that. Could you please repeat?",
             "retry.wav"
         )
         new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/retry.wav"]},
+            {
+                "action": "stream",
+                "streamUrl": [request.url_root + "static_audio/retry.wav"]
+            },
             {
                 "action": "record",
                 "eventUrl": [request.url_root + "recording"],
@@ -110,7 +326,8 @@ def recording():
         update_live_call(call_sid, new_ncco)
         return "", 200
 
-    # We got a valid answer — save it and move forward.
+    # Save this answer and advance step
+    current_question = QUESTIONS[current_step]
     responses[current_question["key"]] = transcript
     new_step = current_step + 1
     update_session(call_sid, new_step, responses)
@@ -118,12 +335,15 @@ def recording():
     next_question = get_next_question(new_step)
 
     if next_question:
+        # Still more trip questions to ask
         ai_reply = chat_with_ai(transcript, next_question["text"])
         text_to_speak = ai_reply if ai_reply else next_question["text"]
-
         synthesize_text(text_to_speak, "question.wav")
         new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/question.wav"]},
+            {
+                "action": "stream",
+                "streamUrl": [request.url_root + "static_audio/question.wav"]
+            },
             {
                 "action": "record",
                 "eventUrl": [request.url_root + "recording"],
@@ -134,16 +354,76 @@ def recording():
                 "format": "wav"
             }
         ]
+
     else:
-        synthesize_text("Thank you! I have all the details I need. Goodbye for now.", "reply.wav")
-        new_ncco = [
-            {"action": "stream", "streamUrl": [request.url_root + "static_audio/reply.wav"]}
-        ]
-        print("Final responses:", responses)
+        # All 8 trip questions done — search for flights
+        print("All trip responses collected:", responses)
+        top_3, error = search_flights(responses)
+
+        if error == "no_flights_found":
+            synthesize_text(
+                "I'm sorry, I couldn't find any flights for those dates. "
+                "Would you like to try a different travel date?",
+                "reply.wav"
+            )
+            update_session(call_sid, 2, responses)
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/reply.wav"]
+                },
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
+
+        elif error:
+            synthesize_text(
+                "I'm sorry, something went wrong while searching for flights. "
+                "Please try calling again shortly.",
+                "reply.wav"
+            )
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/reply.wav"]
+                }
+            ]
+
+        else:
+            # Success — summarize top 3 and move to selection step
+            summary = summarize_flights_for_caller(top_3)
+            update_session(call_sid, SELECTION_STEP, responses, top_3)
+            synthesize_text(summary, "reply.wav")
+            new_ncco = [
+                {
+                    "action": "stream",
+                    "streamUrl": [request.url_root + "static_audio/reply.wav"]
+                },
+                {
+                    "action": "record",
+                    "eventUrl": [request.url_root + "recording"],
+                    "eventMethod": "POST",
+                    "beepStart": True,
+                    "endOnSilence": 3,
+                    "timeOut": 10,
+                    "format": "wav"
+                }
+            ]
 
     update_live_call(call_sid, new_ncco)
     return "", 200
 
+
+# -----------------------------------------------------------------------
+# Helper functions
+# -----------------------------------------------------------------------
 
 def download_vonage_recording(recording_url):
     token = generate_vonage_jwt()
@@ -153,11 +433,7 @@ def download_vonage_recording(recording_url):
 
 
 def update_live_call(call_sid, new_ncco):
-    """
-    Pushes new instructions to a call that's already in progress —
-    this is how we 'continue the conversation' on Vonage, since
-    /recording doesn't pause the call the way Twilio's did.
-    """
+    """Pushes new NCCO instructions to an ongoing Vonage call."""
     token = generate_vonage_jwt()
     url = f"https://api.nexmo.com/v1/calls/{call_sid}"
     headers = {

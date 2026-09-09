@@ -82,3 +82,36 @@ def get_offers_from_session(call_sid):
     cur.close()
     conn.close()
     return row[0] if row else []
+
+def save_passenger_info(call_sid, passenger_data):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO passengers
+            (session_call_sid, full_name, phone, email, loyalty_number)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (
+            call_sid,
+            passenger_data["full_name"],
+            passenger_data["phone"],
+            passenger_data["email"],
+            passenger_data.get("loyalty_number")
+        )
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_session_ready_for_payment(call_sid):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE sessions SET current_step = 'ready_for_payment' WHERE call_sid = %s",
+        (call_sid,)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()

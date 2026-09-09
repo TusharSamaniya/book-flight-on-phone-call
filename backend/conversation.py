@@ -13,3 +13,15 @@ def get_next_question(current_step):
     if current_step >= len(QUESTIONS):
         return None
     return QUESTIONS[current_step]
+
+PASSENGER_QUESTIONS = [
+    {"key": "full_name", "text": "May I have the full name of the traveler?"},
+    {"key": "phone", "text": "Could you share your phone number so we can send you updates?"},
+    {"key": "email", "text": "What is your email address for the booking confirmation?"},
+    {"key": "loyalty_number", "text": "Do you have a frequent flyer or loyalty program number? If not, just say skip."},
+]
+
+def get_next_passenger_question(current_step):
+    if current_step >= len(PASSENGER_QUESTIONS):
+        return None
+    return PASSENGER_QUESTIONS[current_step]
