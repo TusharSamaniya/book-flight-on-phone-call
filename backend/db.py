@@ -109,7 +109,7 @@ def mark_session_ready_for_payment(call_sid):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE sessions SET current_step = 'ready_for_payment' WHERE call_sid = %s",
+        "UPDATE sessions SET current_step = 99 WHERE call_sid = %s",
         (call_sid,)
     )
     conn.commit()

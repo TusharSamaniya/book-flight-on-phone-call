@@ -230,7 +230,7 @@ def recording():
 
                 if payment_result["status"] == "success":
                     # Complete the booking — create record, send SMS + email
-                    dashboard_url = request.url_root + "booking"
+                    dashboard_url = "https://your-vercel-app.vercel.app/booking"
                     booking_result = complete_booking(
                         db_conn_func=get_connection,
                         call_sid=call_sid,
@@ -541,13 +541,8 @@ def handle_unexpected_error(error):
     return "", 200
 
 def process_payment(call_sid, chosen_offer):
-    """
-    Creates a Razorpay order, simulates payment success,
-    saves the result to Supabase, and returns the result.
-    """
     try:
         order = create_payment_order(chosen_offer)
-
         if not order:
             return {"status": "failed", "payment_id": None}
 
@@ -565,6 +560,10 @@ def process_payment(call_sid, chosen_offer):
             currency=currency,
             status=payment_result["status"]
         )
+
+        # Add amount and currency to result so booking.py can use them
+        payment_result["amount"] = amount_paise
+        payment_result["currency"] = currency
 
         return payment_result
 
