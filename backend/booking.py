@@ -3,12 +3,8 @@ import json
 from datetime import datetime
 
 import resend
-import vonage
 
 from config import (
-    VONAGE_API_KEY,
-    VONAGE_API_SECRET,
-    VONAGE_NUMBER,
     RESEND_API_KEY,
     RESEND_FROM_EMAIL,
 )
@@ -64,55 +60,6 @@ def save_booking_record(db_conn_func, call_sid, booking_id, chosen_offer,
     conn.commit()
     cur.close()
     conn.close()
-
-
-# -----------------------------------------------------------------------
-# SMS via Vonage
-# -----------------------------------------------------------------------
-def send_sms_confirmation(to_number, booking_id, chosen_offer,
-                          trip_responses, dashboard_url):
-    """
-    Sends a short booking confirmation SMS to the caller's phone number
-    using Vonage's SMS API (separate from their Voice API —
-    uses API Key + Secret, not the Application ID + private key).
-    """
-    try:
-        client = vonage.Client(
-            key=VONAGE_API_KEY,
-            secret=VONAGE_API_SECRET
-        )
-        sms = vonage.Sms(client)
-
-        origin = trip_responses.get("origin", "")
-        destination = trip_responses.get("destination", "")
-        travel_date = trip_responses.get("travel_date", "")
-        airline = chosen_offer.get("airline", "")
-        price = chosen_offer.get("price", "")
-
-        message = (
-            f"Booking Confirmed! ID: {booking_id}\n"
-            f"{origin} → {destination} on {travel_date}\n"
-            f"Airline: {airline} | Price: {price}\n"
-            f"View: {dashboard_url}/{booking_id}"
-        )
-
-        response = sms.send_message({
-            "from": "AIFlight",
-            "to": to_number,
-            "text": message
-        })
-
-        status = response["messages"][0]["status"]
-        if status == "0":
-            print("SMS sent successfully to", to_number)
-            return True
-        else:
-            print("SMS failed, status:", status)
-            return False
-
-    except Exception as e:
-        print("SMS error:", e)
-        return False
 
 
 # -----------------------------------------------------------------------
@@ -216,7 +163,7 @@ def send_email_confirmation(to_email, booking_id, chosen_offer,
 
 
 # -----------------------------------------------------------------------
-# Master function — call this from app.py after payment succeeds
+# Master function — call this after payment succeeds
 # -----------------------------------------------------------------------
 def complete_booking(db_conn_func, call_sid, chosen_offer,
                      trip_responses, passenger_responses,
@@ -225,15 +172,8 @@ def complete_booking(db_conn_func, call_sid, chosen_offer,
     Orchestrates the full booking completion:
     1. Generates booking ID
     2. Saves booking record to Supabase
-    3. Sends SMS confirmation
-    4. Sends email confirmation
-    5. Returns voice confirmation text + status flags
-
-    Returns a dict with:
-      - booking_id: the generated booking reference
-      - sms_sent: True/False
-      - email_sent: True/False
-      - voice_text: what the AI should say on the call
+    3. Sends email confirmation via Resend
+    4. Returns voice confirmation text + status flags
     """
     booking_id = generate_booking_id()
 
@@ -248,16 +188,7 @@ def complete_booking(db_conn_func, call_sid, chosen_offer,
         payment_result=payment_result
     )
 
-    # 2. Send SMS
-    sms_sent = send_sms_confirmation(
-        to_number=passenger_responses.get("phone", ""),
-        booking_id=booking_id,
-        chosen_offer=chosen_offer,
-        trip_responses=trip_responses,
-        dashboard_url=dashboard_url
-    )
-
-    # 3. Send email
+    # 2. Send email confirmation
     email_sent = send_email_confirmation(
         to_email=passenger_responses.get("email", ""),
         booking_id=booking_id,
@@ -267,30 +198,20 @@ def complete_booking(db_conn_func, call_sid, chosen_offer,
         dashboard_url=dashboard_url
     )
 
-    # 4. Build voice confirmation text based on what succeeded
+    # 3. Build voice confirmation text
     booking_letters = " ".join(list(booking_id))
     voice_text = (
         f"Your booking has been confirmed! "
         f"Your booking ID is {booking_letters}. "
     )
 
-    if sms_sent and email_sent:
+    if email_sent:
         voice_text += (
-            "You will receive an SMS and email shortly with all the details. "
-        )
-    elif sms_sent:
-        voice_text += (
-            "You will receive an SMS shortly with your itinerary. "
-            "We could not send the email, but your booking is confirmed. "
-        )
-    elif email_sent:
-        voice_text += (
-            "You will receive a confirmation email shortly. "
-            "We could not send the SMS, but your booking is confirmed. "
+            "You will receive a confirmation email shortly with all your flight details. "
         )
     else:
         voice_text += (
-            "Your booking is confirmed in our system. "
+            "Your booking is saved in our system. "
             "Please note down your booking ID. "
         )
 
@@ -298,7 +219,6 @@ def complete_booking(db_conn_func, call_sid, chosen_offer,
 
     return {
         "booking_id": booking_id,
-        "sms_sent": sms_sent,
         "email_sent": email_sent,
         "voice_text": voice_text
     }

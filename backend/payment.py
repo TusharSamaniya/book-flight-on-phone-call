@@ -36,29 +36,40 @@ def create_payment_order(chosen_offer):
 
     In test mode, this generates a real order ID that looks exactly
     like a production one — but no actual money is involved.
+
+    If Razorpay is unreachable (timeout/network issues), falls back
+    to a mock order so the demo can complete end-to-end.
     """
-    try:
-        price_string = chosen_offer.get("price", "INR 1.00")
-        currency, amount_paise = parse_amount_to_paise(price_string)
+    import uuid as _uuid
 
-        order_data = {
-            "amount": amount_paise,
-            "currency": currency,
-            "payment_capture": 1,   # auto-capture payment immediately on success
-            "notes": {
-                "airline": chosen_offer.get("airline", ""),
-                "departure": chosen_offer.get("departure_time", ""),
-                "demo": "true"
-            }
+    price_string = chosen_offer.get("price", "INR 1.00")
+    currency, amount_paise = parse_amount_to_paise(price_string)
+
+    order_data = {
+        "amount": amount_paise,
+        "currency": currency,
+        "payment_capture": 1,   # auto-capture payment immediately on success
+        "notes": {
+            "airline": chosen_offer.get("airline", ""),
+            "departure": chosen_offer.get("departure_time", ""),
+            "demo": "true"
         }
+    }
 
+    try:
         order = client.order.create(data=order_data)
         print("Razorpay order created:", order["id"])
         return order
-
     except Exception as e:
-        print("Razorpay order creation error:", e)
-        return None
+        print(f"Razorpay API error ({e}), using mock order for demo")
+        mock_order_id = f"order_DEMO_{_uuid.uuid4().hex[:14]}"
+        return {
+            "id": mock_order_id,
+            "entity": "order",
+            "amount": amount_paise,
+            "currency": currency,
+            "status": "created",
+        }
 
 
 def simulate_payment_success(order_id):

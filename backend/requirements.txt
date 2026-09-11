@@ -1,5 +1,7 @@
 flask
 livekit-agents[groq]
+livekit-plugins-groq
+livekit-plugins-silero
 razorpay
 resend
 psycopg2-binary
