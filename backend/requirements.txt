@@ -1,7 +1,5 @@
 flask
-vonage
-pyjwt
-cryptography
+livekit-agents[groq]
 razorpay
 resend
 psycopg2-binary
